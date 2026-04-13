@@ -92,6 +92,18 @@ class Reader:
         for index, result in enumerate(filter_results):
             print(index, result.title, result.updated)
         return filter_results
+
+    def deduplicate_results(self, results, seen_entry_ids):
+        unique_results = []
+        for result in results:
+            entry_id = getattr(result, "entry_id", None) or getattr(result, "pdf_url", None) or result.title
+            if entry_id in seen_entry_ids:
+                continue
+            seen_entry_ids.add(entry_id)
+            unique_results.append(result)
+        print("去重后剩下的论文数量：")
+        print("unique_results:", len(unique_results))
+        return unique_results
     
     def validateTitle(self, title):
         # 将论文的乱七八糟的路径格式修正
@@ -302,6 +314,7 @@ class Reader:
             model="gpt-5",
             # prompt需要用英语替换，少占用token。
             messages=messages,
+            request_timeout=120,
         )
         result = ''
         for choice in response.choices:
@@ -346,6 +359,7 @@ class Reader:
         response = openai.ChatCompletion.create(
             model="gpt-5",
             messages=messages,
+            request_timeout=120,
         )
         result = ''
         for choice in response.choices:
@@ -393,6 +407,7 @@ class Reader:
         response = openai.ChatCompletion.create(
             model="gpt-5",
             messages=messages,
+            request_timeout=120,
         )
         result = ''
         for choice in response.choices:
@@ -466,7 +481,12 @@ def main(args):
         filter_times_span = (now-timedelta(days=args.filter_times_span), now)
         title = str(now)[:13].replace(' ', '-')
         htmls_body = []
+        seen_entry_ids = set()
+        processed_paper_count = 0
         for filter_key in args.filter_keys:
+            if args.max_total_papers and processed_paper_count >= args.max_total_papers:
+                print("已达到本次运行的总论文上限，提前结束。")
+                break
             # 对于每一个主题做一遍
             # filter_key: remote sensing
             # query: all:remote AND all:sensing
@@ -487,7 +507,17 @@ def main(args):
                             )
             reader1.show_info()
             filter_results = reader1.filter_arxiv(max_results=args.max_results)
+            filter_results = reader1.deduplicate_results(filter_results, seen_entry_ids)
+            if args.max_papers_per_keyword:
+                filter_results = filter_results[:args.max_papers_per_keyword]
+            if args.max_total_papers:
+                remaining_quota = args.max_total_papers - processed_paper_count
+                if remaining_quota <= 0:
+                    print("已没有剩余论文配额，结束本次运行。")
+                    break
+                filter_results = filter_results[:remaining_quota]
             paper_list = reader1.download_pdf(filter_results)
+            processed_paper_count += len(paper_list)
             reader1.summary_with_chat(paper_list=paper_list, htmls=htmls)
             # htmls.append("#######test#########")
             htmls_body += htmls
@@ -501,7 +531,9 @@ if __name__ == '__main__':
     parser.add_argument("--key_word", type=str, default='remote sensing', help="the key word of user research fields")
     parser.add_argument("--filter_keys", type=list, default=KEYWORD_LIST, help="the filter key words, 摘要中每个单词都得有，才会被筛选为目标论文")
     parser.add_argument("--filter_times_span", type=int, default=3.5, help='how many days of files to be filtered.')
-    parser.add_argument("--max_results", type=int, default=20, help="the maximum number of results")
+    parser.add_argument("--max_results", type=int, default=10, help="the maximum number of results")
+    parser.add_argument("--max_papers_per_keyword", type=int, default=3, help="maximum papers to process for each keyword, 0 means unlimited")
+    parser.add_argument("--max_total_papers", type=int, default=6, help="maximum papers to process in one run, 0 means unlimited")
     # arxiv.SortCriterion.Relevance
     parser.add_argument("--sort", type=str, default="LastUpdatedDate", help="another is LastUpdatedDate | Relevance")
     parser.add_argument("--file_format", type=str, default='md', help="导出的文件格式，如果存图片的话，最好是md，如果不是的话，txt的不会乱")
