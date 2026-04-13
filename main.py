@@ -15,7 +15,7 @@ from github_issue import make_github_issue
 # os.environ["http_proxy"] = "http://127.0.0.1:7890"
 # os.environ["https_proxy"] = "http://127.0.0.1:7890"
 
-from config import OPENAI_API_KEYS, KEYWORD_LIST, LANGUAGE
+from config import OPENAI_API_KEYS, KEYWORD_LIST, LANGUAGE, OPENAI_API_BASE
 
 from datetime import datetime, timedelta
 import pytz
@@ -275,6 +275,7 @@ class Reader:
                     reraise=True)
     def chat_conclusion(self, text, conclusion_prompt_token = 800):
         openai.api_key = self.chat_api_list[self.cur_api]
+        openai.api_base = OPENAI_API_BASE
         self.cur_api += 1
         self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
         text_token = len(self.encoding.encode(text))
