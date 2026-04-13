@@ -16,7 +16,7 @@ REPO_NAME = 'super-resolution-and-RL'
 NEW_SUB_URL = 'https://arxiv.org/list/cs/new'
 
 # Keywords to search
-KEYWORD_LIST = ["image super-resolution", "super-resolution", "SR", "image reconstruction", "image restoration", "image enhancement", "image quality improvement", "image detail enhancement","reinforcement learning", "RL", "deep reinforcement learning", "DRL", "policy optimization"]
+KEYWORD_LIST = ["super-resolution", "SR","reinforcement learning", "RL"]
 OPENAI_API_KEYS = ["sk-nG2b2a92a6ad1c499d24d5c93436a6d5a61ce779e1885ZQ9"]
 OPENAI_API_BASE = "https://api.gptsapi.net/v1"
 
