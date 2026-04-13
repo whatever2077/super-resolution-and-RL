@@ -17,6 +17,6 @@ NEW_SUB_URL = 'https://arxiv.org/list/cs/new'
 
 # Keywords to search
 KEYWORD_LIST = ["image super-resolution", "super-resolution", "SR", "image reconstruction", "image restoration", "image enhancement", "image quality improvement", "image detail enhancement","reinforcement learning", "RL", "deep reinforcement learning", "DRL", "policy optimization"]
-OPENAI_API_KEYS = ["sk-nG2b2a92a6ad1c499d24d5c93436a6d5a61ce779e1885ZQ9",]
+OPENAI_API_KEYS = ["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",]
 LANGUAGE = "zh" 
 
