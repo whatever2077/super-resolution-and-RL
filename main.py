@@ -318,6 +318,7 @@ class Reader:
                     reraise=True)
     def chat_method(self, text, method_prompt_token = 800):
         openai.api_key = self.chat_api_list[self.cur_api]
+        openai.api_base = OPENAI_API_BASE
         self.cur_api += 1
         self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
         text_token = len(self.encoding.encode(text))
@@ -361,6 +362,7 @@ class Reader:
                     reraise=True)
     def chat_summary(self, text, summary_prompt_token = 1100):
         openai.api_key = self.chat_api_list[self.cur_api]
+        openai.api_base = OPENAI_API_BASE
         self.cur_api += 1
         self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
         text_token = len(self.encoding.encode(text))
