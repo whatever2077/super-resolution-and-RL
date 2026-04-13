@@ -299,7 +299,7 @@ class Reader:
                  """.format(self.language, self.language)},
             ]
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-5",
             # prompt需要用英语替换，少占用token。
             messages=messages,
         )
@@ -344,7 +344,7 @@ class Reader:
                  """.format(self.language, self.language)},
             ]
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-5",
             messages=messages,
         )
         result = ''
@@ -391,7 +391,7 @@ class Reader:
             ]
                 
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-5",
             messages=messages,
         )
         result = ''
