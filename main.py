@@ -12,8 +12,8 @@ from get_paper_from_pdf import Paper
 from github_issue import make_github_issue
 
 
-# os.environ["http_proxy"] = "http://127.0.0.1:7890"
-# os.environ["https_proxy"] = "http://127.0.0.1:7890"
+os.environ["http_proxy"] = "http://127.0.0.1:7890"
+os.environ["https_proxy"] = "http://127.0.0.1:7890"
 
 from config import OPENAI_API_KEYS, KEYWORD_LIST, LANGUAGE
 
