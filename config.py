@@ -16,7 +16,7 @@ REPO_NAME = 'super-resolution-and-RL'
 NEW_SUB_URL = 'https://arxiv.org/list/cs/new'
 
 # Keywords to search
-KEYWORD_LIST = ["super-resolution", "SR"]
+KEYWORD_LIST = ["super-resolution", "reinforcement learning"]
 OPENAI_API_KEYS = ["sk-nG2b2a92a6ad1c499d24d5c93436a6d5a61ce779e1885ZQ9"]
 OPENAI_API_BASE = "https://api.gptsapi.net/v1"
 
