@@ -5,13 +5,13 @@ on:
     branches:
       - main
   schedule:
-    -   cron: "10 20 * * 1,4"
+    -   cron: "10 20 * * *"
 
 jobs:
   backup:
     runs-on: ubuntu-latest
     name: Backup
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       -   uses: actions/checkout@v2
       - name: Set up Python
@@ -22,7 +22,7 @@ jobs:
           run: |
             if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
       -   name: Run backup
-          run: python main.py
+          run: python main.py --max_results 12 --max_papers_per_keyword 1 --max_total_papers 3 --category_prefixes cs.
 
       -   name: Commit changes
           uses: elstudio/actions-js-build/commit@v3
