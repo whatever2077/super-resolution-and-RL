@@ -1,7 +1,5 @@
-import numpy as np
 import os
 import re
-import datetime
 import arxiv
 import openai, tenacity
 import base64, requests
@@ -15,7 +13,16 @@ from github_issue import make_github_issue
 # os.environ["http_proxy"] = "http://127.0.0.1:7890"
 # os.environ["https_proxy"] = "http://127.0.0.1:7890"
 
-from config import OPENAI_API_KEYS, KEYWORD_LIST, LANGUAGE, OPENAI_API_BASE
+from config import (
+    OPENAI_API_KEYS,
+    KEYWORD_LIST,
+    LANGUAGE,
+    OPENAI_API_BASE,
+    OPENAI_MODEL,
+    ARXIV_CATEGORY_PREFIXES,
+    DAILY_MAX_PAPERS,
+    OUTPUT_TIMEZONE,
+)
 
 from datetime import datetime, timedelta
 import pytz
@@ -43,6 +50,8 @@ class Reader:
             self.language = 'Chinese'        
         self.filter_keys = filter_keys # 用于在摘要中筛选的关键词
         self.filter_times_span = filter_times_span  # 用于选定某区间更新的arxiv paper
+        self.category_prefixes = args.category_prefixes
+        self.openai_model = args.openai_model
 
         self.root_path = root_path
 
@@ -53,6 +62,13 @@ class Reader:
         self.file_format = args.file_format        
         self.max_token_num = 4096
         self.encoding = tiktoken.get_encoding("gpt2")
+
+    def _rotate_api_key(self):
+        if not self.chat_api_list:
+            raise ValueError("OPENAI_API_KEYS 为空，请先在 config.py 或环境变量中配置可用的 API Key。")
+        openai.api_key = self.chat_api_list[self.cur_api]
+        openai.api_base = OPENAI_API_BASE
+        self.cur_api = (self.cur_api + 1) % len(self.chat_api_list)
                 
     def get_arxiv(self, max_results=30):
         # https://info.arxiv.org/help/api/user-manual.html#query_details
@@ -65,8 +81,9 @@ class Reader:
      
     def filter_arxiv(self, max_results=30):
         search = self.get_arxiv(max_results=max_results)
+        search_results = list(search.results())
         print("all search:")
-        for index, result in enumerate(search.results()):
+        for index, result in enumerate(search_results):
             print(index, result.title, result.updated)
             
         filter_results = []   
@@ -74,14 +91,17 @@ class Reader:
         
         print("filter_keys:", self.filter_keys)
         # 确保每个关键词都能在摘要中找到，才算是目标论文
-        for index, result in enumerate(search.results()):
+        for index, result in enumerate(search_results):
             # 过滤不在时间范围内的论文
             if result.updated < self.filter_times_span[0] or result.updated > self.filter_times_span[1]:
-                continue 
+                continue
+            if not self.is_target_category(result):
+                continue
             abs_text = result.summary.replace('-\n', '-').replace('\n', ' ')
+            corpus_text = f"{result.title} {abs_text}"
             meet_num = 0
             for f_key in filter_keys.split(" "):
-                if f_key.lower() in abs_text.lower():
+                if self.contains_keyword(corpus_text, f_key):
                     meet_num += 1
             if meet_num == len(filter_keys.split(" ")):
                 filter_results.append(result)
@@ -92,6 +112,27 @@ class Reader:
         for index, result in enumerate(filter_results):
             print(index, result.title, result.updated)
         return filter_results
+
+    def is_target_category(self, result):
+        if not self.category_prefixes:
+            return True
+        categories = set(getattr(result, "categories", []) or [])
+        primary_category = getattr(result, "primary_category", "")
+        if primary_category:
+            categories.add(primary_category)
+        return any(
+            category.startswith(prefix)
+            for category in categories
+            for prefix in self.category_prefixes
+        )
+
+    def contains_keyword(self, text, keyword):
+        normalized_keyword = keyword.strip()
+        if not normalized_keyword:
+            return False
+        if len(normalized_keyword) <= 4 and normalized_keyword.replace("-", "").isalnum():
+            return re.search(r"\b{}\b".format(re.escape(normalized_keyword)), text, re.IGNORECASE) is not None
+        return normalized_keyword.lower() in text.lower()
 
     def deduplicate_results(self, results, seen_entry_ids):
         unique_results = []
@@ -163,7 +204,7 @@ class Reader:
             base64_data = base64.b64encode(f.read())
             base64_content = base64_data.decode()
         
-        date_str = str(datetime.datetime.now())[:19].replace(':', '-').replace(' ', '-') + '.' + ext
+        date_str = str(datetime.now())[:19].replace(':', '-').replace(' ', '-') + '.' + ext
         path = image_name+ '-' +date_str
         
         payload = {
@@ -189,17 +230,10 @@ class Reader:
         if htmls is None:
             htmls = []
         for paper_index, paper in enumerate(paper_list):
-            # 第一步先用title，abs，和introduction进行总结。
-            text = ''
-            text += 'Title:' + paper.title
-            text += 'Url:' + paper.url
-            text += 'Abstrat:' + paper.abs
-            text += 'Paper_info:' + paper.section_text_dict['paper_info']
-            # intro
-            text += list(paper.section_text_dict.values())[0]
+            text = self.build_summary_source_text(paper)
             chat_summary_text = ""
             try:
-                chat_summary_text = self.chat_summary(text=text)     
+                chat_summary_text = self.chat_summary(text=text)
             except Exception as e:
                 print("summary_error:", e)
                 if "maximum context" in str(e):
@@ -208,88 +242,44 @@ class Reader:
                     summary_prompt_token = offset+1000+150
                     chat_summary_text = self.chat_summary(text=text, summary_prompt_token=summary_prompt_token)
 
-            # htmls.append('## Paper:' + str(paper_index+1))
             htmls.append(f'## {paper.title}')
-            htmls.append(f'- **Url**: {paper.url}')
-            htmls.append(f'- **Authors**: {paper.authers}')
-            htmls.append(f'- **Abstrat**: {paper.abs}')
-            htmls.append('\n')            
+            htmls.append(f'- **论文链接**: {paper.url}')
+            htmls.append(f'- **作者**: {", ".join(paper.authers)}')
+            htmls.append(f'- **原始摘要**: {paper.abs}')
+            htmls.append('')
             htmls.append(chat_summary_text)
-            htmls.append('\n') 
-            # 第二步总结方法：
-            # TODO，由于有些文章的方法章节名是算法名，所以简单的通过关键词来筛选，很难获取，后面需要用其他的方案去优化。
-            # method_key = ''
-            # for parse_key in paper.section_text_dict.keys():
-            #     if 'method' in parse_key.lower() or 'approach' in parse_key.lower():
-            #         method_key = parse_key
-            #         break
-                
-            # if method_key != '':
-            #     text = ''
-            #     method_text = ''
-            #     summary_text = ''
-            #     summary_text += "<summary>" + chat_summary_text
-            #     # methods                
-            #     method_text += paper.section_text_dict[method_key]                   
-            #     text = summary_text + "\n\n<Methods>:\n\n" + method_text                 
-            #     chat_method_text = ""
-            #     try:
-            #         chat_method_text = self.chat_method(text=text)                    
-            #     except Exception as e:
-            #         print("method_error:", e)
-            #         if "maximum context" in str(e):
-            #             current_tokens_index = str(e).find("your messages resulted in") + len("your messages resulted in")+1
-            #             offset = int(str(e)[current_tokens_index:current_tokens_index+4])
-            #             method_prompt_token = offset+800+150                        
-            #             chat_method_text = self.chat_method(text=text, method_prompt_token=method_prompt_token)           
-            #     htmls.append(chat_method_text)
-            # else:
-            #     chat_method_text = ''
-            # htmls.append("\n"*4)
-            
-            # # 第三步总结全文，并打分：
-            # conclusion_key = ''
-            # for parse_key in paper.section_text_dict.keys():
-            #     if 'conclu' in parse_key.lower():
-            #         conclusion_key = parse_key
-            #         break
-            
-            # text = ''
-            # conclusion_text = ''
-            # summary_text = ''
-            # summary_text += "<summary>" + chat_summary_text + "\n <Method summary>:\n" + chat_method_text            
-            # if conclusion_key != '':
-            #     # conclusion                
-            #     conclusion_text += paper.section_text_dict[conclusion_key]                                
-            #     text = summary_text + "\n\n<Conclusion>:\n\n" + conclusion_text 
-            # else:
-            #     text = summary_text            
-            # chat_conclusion_text = ""
-            # try:
-            #     chat_conclusion_text = self.chat_conclusion(text=text)                 
-            # except Exception as e:
-            #     print("conclusion_error:", e)
-            #     if "maximum context" in str(e):
-            #         current_tokens_index = str(e).find("your messages resulted in") + len("your messages resulted in")+1
-            #         offset = int(str(e)[current_tokens_index:current_tokens_index+4])
-            #         conclusion_prompt_token = offset+800+150                                            
-            #         chat_conclusion_text = self.chat_conclusion(text=text, conclusion_prompt_token=conclusion_prompt_token)
-            # htmls.append(chat_conclusion_text)
-            # htmls.append("\n"*4)
-            
-            # file_name = os.path.join(export_path, date_str+'-'+self.validateTitle(paper.title)+".md")
-            # self.export_to_markdown("\n".join(htmls), file_name=file_name, mode=mode)
-            # self.save_to_file(htmls)
-            # htmls = []
+            htmls.append('')
+
+    def build_summary_source_text(self, paper):
+        section_dict = getattr(paper, "section_text_dict", {})
+        sections = [
+            ("Title", paper.title),
+            ("Url", paper.url),
+            ("Abstract", paper.abs),
+            ("PaperInfo", section_dict.get("paper_info", "")),
+            ("Introduction", self.pick_section_text(section_dict, ["Introduction", "Background", "Related Work"])),
+            ("Method", self.pick_section_text(section_dict, ["Methods", "Methodology", "Method", "Approach", "Approaches", "Problem Formulation"])),
+            ("Experiment", self.pick_section_text(section_dict, ["Experiments", "Experiment", "Experimental Results", "Evaluation", "Results"])),
+            ("Conclusion", self.pick_section_text(section_dict, ["Conclusion", "Discussion", "Results and Discussion"])),
+        ]
+        return "\n\n".join(
+            f"{section_name}: {section_text}"
+            for section_name, section_text in sections
+            if section_text
+        )
+
+    def pick_section_text(self, section_dict, candidate_names):
+        for section_name in candidate_names:
+            section_text = section_dict.get(section_name, "")
+            if section_text:
+                return section_text
+        return ""
 
     @tenacity.retry(wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
                     stop=tenacity.stop_after_attempt(5),
                     reraise=True)
     def chat_conclusion(self, text, conclusion_prompt_token = 800):
-        openai.api_key = self.chat_api_list[self.cur_api]
-        openai.api_base = OPENAI_API_BASE
-        self.cur_api += 1
-        self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
+        self._rotate_api_key()
         text_token = len(self.encoding.encode(text))
         clip_text_index = int(len(text)*(self.max_token_num-conclusion_prompt_token)/text_token)
         clip_text = text[:clip_text_index]   
@@ -311,7 +301,7 @@ class Reader:
                  """.format(self.language, self.language)},
             ]
         response = openai.ChatCompletion.create(
-            model="gpt-5",
+            model=self.openai_model,
             # prompt需要用英语替换，少占用token。
             messages=messages,
             request_timeout=120,
@@ -330,10 +320,7 @@ class Reader:
                     stop=tenacity.stop_after_attempt(5),
                     reraise=True)
     def chat_method(self, text, method_prompt_token = 800):
-        openai.api_key = self.chat_api_list[self.cur_api]
-        openai.api_base = OPENAI_API_BASE
-        self.cur_api += 1
-        self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
+        self._rotate_api_key()
         text_token = len(self.encoding.encode(text))
         clip_text_index = int(len(text)*(self.max_token_num-method_prompt_token)/text_token)
         clip_text = text[:clip_text_index]        
@@ -357,7 +344,7 @@ class Reader:
                  """.format(self.language, self.language)},
             ]
         response = openai.ChatCompletion.create(
-            model="gpt-5",
+            model=self.openai_model,
             messages=messages,
             request_timeout=120,
         )
@@ -375,37 +362,36 @@ class Reader:
                     stop=tenacity.stop_after_attempt(5),
                     reraise=True)
     def chat_summary(self, text, summary_prompt_token = 1100):
-        openai.api_key = self.chat_api_list[self.cur_api]
-        openai.api_base = OPENAI_API_BASE
-        self.cur_api += 1
-        self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
+        self._rotate_api_key()
         text_token = len(self.encoding.encode(text))
         clip_text_index = int(len(text)*(self.max_token_num-summary_prompt_token)/text_token)
         clip_text = text[:clip_text_index]
         messages=[
                 {"role": "system", "content": "You are a researcher in the field of ["+self.key_word+"] who is good at summarizing papers using concise statements"},
-                {"role": "assistant", "content": "This is the title, author, link, abstract and introduction of an English document. I need your help to read and summarize the following questions: "+clip_text},
+                {"role": "assistant", "content": "This is the title, author, link, abstract, introduction, method, experiment and conclusion extracted from an English paper. I need your help to summarize it into a daily reading note: "+clip_text},
                 {"role": "user", "content": """                 
-                 summarize according to the following five points.Be sure to use {} answers (proper nouns need to be marked in English)
-                    - (1):What is the research background of this article?
-                    - (2):What are the past methods? What are the problems with them? What difference is the proposed approach from existing methods? How does the proposed method address the mentioned problems? Is the proposed approach well-motivated? 
-                    - (3):What is the contribution of the paper?
-                    - (4):What is the research methodology proposed in this paper?
-                    - (5):On what task and what performance is achieved by the methods in this paper? Can the performance support their goals?
-                 Follow the format of the output that follows:                    
-                 **Summary**: \n\n
-                    - (1):xxx;\n 
-                    - (2):xxx;\n 
-                    - (3):xxx;\n 
-                    - (4):xxx;\n  
-                    - (5):xxx.\n\n     
-                 
-                 Be sure to use {} answers (proper nouns need to be marked in English), statements as concise and academic as possible, do not have too much repetitive information, numerical values using the original numbers, be sure to strictly follow the format, the corresponding content output to xxx, in accordance with \n line feed.                 
+                 Please answer in {} and strictly use the following Markdown format.
+                 If some information is missing in the source text, say "文中未明确说明" instead of guessing.
+
+                 ### GPT总结
+                 #### 文章内容
+                 用2-4句话概括这篇论文要解决什么问题、核心思路是什么、主要结论是什么。
+
+                 #### 方法
+                 用3-5条要点概括方法流程、关键模块、训练/推理方式或决策机制。
+
+                 #### 创新点
+                 用2-4条要点概括相对已有工作的主要创新，强调结构设计、任务建模、优化目标或实验设置上的新意。
+
+                 #### 实验结论
+                 用2-3条要点概括任务、数据集、核心结果和作者结论。
+
+                 Keep the statements concise, academic, and faithful to the paper. Preserve original numbers and proper nouns in English when they appear.
                  """.format(self.language, self.language, self.language)},
             ]
                 
         response = openai.ChatCompletion.create(
-            model="gpt-5",
+            model=self.openai_model,
             messages=messages,
             request_timeout=120,
         )
@@ -428,13 +414,13 @@ class Reader:
 def save_to_file(htmls, root_path='./', date_str=None, file_format='md'):
     # # 整合成一个文件，打包保存下来。
     if date_str is None:
-        date_str = str(datetime.now())[:13].replace(' ', '-')
+        date_str = datetime.now().strftime("%Y-%m-%d")
     try:
         export_path = os.path.join(root_path, 'export')
         os.makedirs(export_path, exist_ok=True)
     except:
         pass                             
-    mode = 'a'
+    mode = 'w'
     file_name = os.path.join(export_path, date_str+"."+file_format)
     export_to_markdown("\n".join(htmls), file_name=file_name, mode=mode)
 
@@ -479,8 +465,16 @@ def main(args):
         reader1.summary_with_chat(paper_list=paper_list)
     else:
         filter_times_span = (now-timedelta(days=args.filter_times_span), now)
-        title = str(now)[:13].replace(' ', '-')
-        htmls_body = []
+        report_date = datetime.now(pytz.timezone(args.output_timezone)).strftime("%Y-%m-%d")
+        title = f"{report_date}-cs-daily-papers"
+        htmls_body = [
+            f"# {report_date} 计算机领域论文日报",
+            "",
+            f"> 更新时间范围：最近 {args.filter_times_span} 天",
+            f"> 分类限制：{', '.join(args.category_prefixes)}",
+            f"> 单次最多输出：{args.max_total_papers} 篇",
+            "",
+        ]
         seen_entry_ids = set()
         processed_paper_count = 0
         for filter_key in args.filter_keys:
@@ -497,7 +491,6 @@ def main(args):
                     query += ' AND '
                 query += f'all:{item}'
             htmls = []
-            htmls.append(f'# {filter_key}')
             reader1 = Reader(key_word=key_word, 
                             query=query, 
                             filter_keys=filter_key,
@@ -516,11 +509,24 @@ def main(args):
                     print("已没有剩余论文配额，结束本次运行。")
                     break
                 filter_results = filter_results[:remaining_quota]
+            if not filter_results:
+                continue
             paper_list = reader1.download_pdf(filter_results)
+            if not paper_list:
+                continue
             processed_paper_count += len(paper_list)
+            htmls.append(f'## 关键词：{filter_key}')
+            htmls.append('')
             reader1.summary_with_chat(paper_list=paper_list, htmls=htmls)
-            # htmls.append("#######test#########")
             htmls_body += htmls
+            if args.max_total_papers and processed_paper_count >= args.max_total_papers:
+                break
+        if processed_paper_count == 0:
+            htmls_body.extend([
+                "## 今日结果",
+                "",
+                "今天没有筛选到同时满足关键词、时间窗口和 `cs.*` 分类限制的新论文。",
+            ])
         save_to_file(htmls_body, date_str=title, root_path='./')
         make_github_issue(title=title, body="\n".join(htmls_body), labels=args.filter_keys)
 
@@ -529,15 +535,18 @@ if __name__ == '__main__':
     parser.add_argument("--pdf_path", type=str, default='', help="if none, the bot will download from arxiv with query")
     parser.add_argument("--query", type=str, default='all:remote AND all:sensing', help="the query string, ti: xx, au: xx, all: xx,") 
     parser.add_argument("--key_word", type=str, default='remote sensing', help="the key word of user research fields")
-    parser.add_argument("--filter_keys", type=list, default=KEYWORD_LIST, help="the filter key words, 摘要中每个单词都得有，才会被筛选为目标论文")
-    parser.add_argument("--filter_times_span", type=int, default=3.5, help='how many days of files to be filtered.')
+    parser.add_argument("--filter_keys", nargs='*', default=KEYWORD_LIST, help="the filter key words, 摘要和标题中每个单词都得有，才会被筛选为目标论文")
+    parser.add_argument("--filter_times_span", type=float, default=1.5, help='how many days of files to be filtered.')
     parser.add_argument("--max_results", type=int, default=10, help="the maximum number of results")
-    parser.add_argument("--max_papers_per_keyword", type=int, default=3, help="maximum papers to process for each keyword, 0 means unlimited")
-    parser.add_argument("--max_total_papers", type=int, default=6, help="maximum papers to process in one run, 0 means unlimited")
+    parser.add_argument("--max_papers_per_keyword", type=int, default=1, help="maximum papers to process for each keyword, 0 means unlimited")
+    parser.add_argument("--max_total_papers", type=int, default=DAILY_MAX_PAPERS, help="maximum papers to process in one run, 0 means unlimited")
     # arxiv.SortCriterion.Relevance
     parser.add_argument("--sort", type=str, default="LastUpdatedDate", help="another is LastUpdatedDate | Relevance")
     parser.add_argument("--file_format", type=str, default='md', help="导出的文件格式，如果存图片的话，最好是md，如果不是的话，txt的不会乱")
     parser.add_argument("--language", type=str, default=LANGUAGE, help="The other output lauguage is English, is en")
+    parser.add_argument("--openai_model", type=str, default=OPENAI_MODEL, help="model name used for paper summarization")
+    parser.add_argument("--category_prefixes", nargs='*', default=ARXIV_CATEGORY_PREFIXES, help="arXiv category prefixes to keep, for example: cs.")
+    parser.add_argument("--output_timezone", type=str, default=OUTPUT_TIMEZONE, help="timezone used in report titles and markdown filenames")
     
     args = parser.parse_args()
     import time
