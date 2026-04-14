@@ -69,6 +69,20 @@ class Reader:
         openai.api_key = self.chat_api_list[self.cur_api]
         openai.api_base = OPENAI_API_BASE
         self.cur_api = (self.cur_api + 1) % len(self.chat_api_list)
+
+    def _log_response_stats(self, response, label):
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            print(
+                "prompt_token_used:", getattr(usage, "prompt_tokens", None),
+                "completion_token_used:", getattr(usage, "completion_tokens", None),
+                "total_token_used:", getattr(usage, "total_tokens", None),
+            )
+        response_ms = getattr(response, "response_ms", None)
+        if response_ms is not None:
+            print("response_time:", response_ms / 1000.0, 's')
+        else:
+            print(f"{label}_response_time: unavailable")
                 
     def get_arxiv(self, max_results=30):
         # https://info.arxiv.org/help/api/user-manual.html#query_details
@@ -240,7 +254,13 @@ class Reader:
                     current_tokens_index = str(e).find("your messages resulted in") + len("your messages resulted in")+1
                     offset = int(str(e)[current_tokens_index:current_tokens_index+4])
                     summary_prompt_token = offset+1000+150
-                    chat_summary_text = self.chat_summary(text=text, summary_prompt_token=summary_prompt_token)
+                    try:
+                        chat_summary_text = self.chat_summary(text=text, summary_prompt_token=summary_prompt_token)
+                    except Exception as retry_error:
+                        print("summary_retry_error:", retry_error)
+                        chat_summary_text = self.build_summary_error_message(retry_error)
+                else:
+                    chat_summary_text = self.build_summary_error_message(e)
 
             htmls.append(f'## {paper.title}')
             htmls.append(f'- **论文链接**: {paper.url}')
@@ -249,6 +269,18 @@ class Reader:
             htmls.append('')
             htmls.append(chat_summary_text)
             htmls.append('')
+
+    def build_summary_error_message(self, error):
+        error_message = str(error).replace('\n', ' ').strip()
+        if len(error_message) > 300:
+            error_message = error_message[:300] + "..."
+        return "\n".join([
+            "### GPT总结",
+            "",
+            f"当前论文的 GPT 总结生成失败：`{error_message or '未知错误'}`",
+            "",
+            "建议检查 `OPENAI_API_KEYS`、`OPENAI_API_BASE`、`OPENAI_MODEL` 是否可用，然后重新运行脚本。",
+        ])
 
     def build_summary_source_text(self, paper):
         section_dict = getattr(paper, "section_text_dict", {})
@@ -310,10 +342,7 @@ class Reader:
         for choice in response.choices:
             result += choice.message.content
         print("conclusion_result:\n", result)
-        print("prompt_token_used:", response.usage.prompt_tokens,
-              "completion_token_used:", response.usage.completion_tokens,
-              "total_token_used:", response.usage.total_tokens)
-        print("response_time:", response.response_ms/1000.0, 's')             
+        self._log_response_stats(response, "conclusion")
         return result            
     
     @tenacity.retry(wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
@@ -352,10 +381,7 @@ class Reader:
         for choice in response.choices:
             result += choice.message.content
         print("method_result:\n", result)
-        print("prompt_token_used:", response.usage.prompt_tokens,
-              "completion_token_used:", response.usage.completion_tokens,
-              "total_token_used:", response.usage.total_tokens)
-        print("response_time:", response.response_ms/1000.0, 's') 
+        self._log_response_stats(response, "method")
         return result
     
     @tenacity.retry(wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
@@ -399,10 +425,7 @@ class Reader:
         for choice in response.choices:
             result += choice.message.content
         print("summary_result:\n", result)
-        print("prompt_token_used:", response.usage.prompt_tokens,
-              "completion_token_used:", response.usage.completion_tokens,
-              "total_token_used:", response.usage.total_tokens)
-        print("response_time:", response.response_ms/1000.0, 's')                    
+        self._log_response_stats(response, "summary")
         return result      
 
     # 定义一个方法，打印出读者信息
